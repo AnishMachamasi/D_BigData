@@ -1,0 +1,214 @@
+version: '3'
+
+services:
+  kafka:
+    image: wurstmeister/kafka:latest
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_HOST_NAME: kafka
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CREATE_TOPICS: "test-topic:1:1"  # Replace with your desired topics
+    depends_on:
+      - zookeeper
+    networks:
+      - kafka-net
+
+  zookeeper:
+    image: wurstmeister/zookeeper:latest
+    ports:
+      - "2181:2181"
+    networks:
+      - kafka-net
+      
+  jupyter:
+    build:
+      context: .
+      dockerfile: ./jupyter/Dockerfile
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks/:/home/jovyan/spark  # Mount local directory for notebooks
+    environment:
+      - JUPYTER_ENABLE_LAB = yes
+      - GRANT_SUDO=yes
+      - SPARK_MASTER=spark://spark:7077
+    networks:
+      - kafka-net
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: Mysql123
+      MYSQL_DATABASE: mysqldb
+      MYSQL_USER: mysqluser
+      MYSQL_PASSWORD: Mysql123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - kafka-net
+
+######################################################
+# SPARK SERVICES
+######################################################
+  spark:
+    image: bitnami/spark:3.5.0
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - JAVA_HOME=/opt/bitnami/java
+      - SPARK_JARS_DIR=/opt/bitnami/spark/jars
+    ports:
+      - "8181:8080"
+      - "7077:7077"
+    networks:
+      - kafka-net
+  spark-worker:
+    image: bitnami/spark:3.5.0
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+      - SPARK_JARS_DIR=/opt/bitnami/spark/jars
+      - JAVA_HOME=/opt/bitnami/java
+    networks:
+      - kafka-net
+    ports:
+      - "8082:8082"
+
+  metabase:
+    image: metabase/metabase
+    ports:
+      - 3000:3000
+    networks:
+      - kafka-net
+
+  ## Airflow
+  postgres:
+    image: postgres:12
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./data:/data
+    networks:
+      - kafka-net
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@example.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"  # Map container's port 80 to host's port 5050
+    networks:
+      - kafka-net
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: ./airflow/Dockerfile
+    entrypoint: ./scripts/airflow-entrypoint.sh
+    command: scheduler
+    restart: on-failure
+    depends_on:
+      - postgres
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgres+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs=
+      - AIRFLOW_CONN_METADATA_DB=postgres+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW_VAR__METADATA_DB_SCHEMA=airflow
+      - AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC=5
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+    env_file:
+      - .env
+    ports:
+      - "8794:8793"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./airflow-logs:/opt/airflow/logs
+      - ./scripts:/opt/airflow/scripts
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /usr/local/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 30s
+      retries: 2
+    networks:
+      - kafka-net
+
+  webserver:
+    hostname: webserver
+    build:
+      context: .
+      dockerfile: ./airflow/Dockerfile
+    entrypoint: ./scripts/airflow-entrypoint.sh
+    command: webserver
+    restart: always
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgres+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW__CORE__FERNET_KEY=81HqDtbqAywKSOumSha3BhWNOdQ26slT6K0YaZeZyPs=
+      - AIRFLOW_CONN_METADATA_DB=postgres+psycopg2://airflow:airflow@postgres:5432/airflow
+      - AIRFLOW_VAR__METADATA_DB_SCHEMA=airflow
+      - AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC=5
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./airflow-logs:/opt/airflow/logs
+      - ./scripts:/opt/airflow/scripts
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f /usr/local/airflow/airflow-webserver.pid ]"]
+      interval: 30s
+      timeout: 30s
+      retries: 2
+    networks:
+      - kafka-net
+
+## minio service
+  minio:
+      hostname: myminio # if you want to communicate between the container, always use hostname, otherwise localhost
+      image: quay.io/minio/minio
+      restart: always
+      ports:
+          - "9000:9000"
+          - "9001:9001"
+      volumes:
+          - ./miniodata:/data/
+      environment:
+          - MINIO_ROOT_USER=minio
+          - MINIO_ROOT_PASSWORD=minio123
+          - EXECUTOR=Local
+      command: server /data --console-address ":9001"
+      networks:
+          - kafka-net
+      
+networks:
+  kafka-net:
+    driver: bridge
+    
+volumes:
+  postgres-data:
+  miniodata:
+  mysql-data:
